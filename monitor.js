@@ -1,8 +1,9 @@
 'use strict';
 const SERVICE='7c0c5f59-c2c8-4c71-9b80-535449530001', CHARACTERISTIC='7c0c5f59-c2c8-4c71-9b80-535449530002';
+const BPM_CHARACTERISTIC='7c0c5f59-c2c8-4c71-9b80-535449530003';
 const names=['Calm breathing','Fast breathing','Not attached','Shaking'], colors=['#5ed79b','#ff707e','#71adff','#e18aff'];
 const $=id=>document.getElementById(id);
-let device,characteristic,audio,muted=false,connected=false,busy=false,lastPacket=0,lastInferenceAt=0,lastCounter=null,boot=null,current=null,segments=[],alarmText='',lastBeep=0;
+let device,characteristic,bpmCharacteristic,lastBpm=0,audio,muted=false,connected=false,busy=false,lastPacket=0,lastInferenceAt=0,lastCounter=null,boot=null,current=null,segments=[],alarmText='',lastBeep=0;
 $('legend').innerHTML=names.map((n,i)=>`<span class="swatch" style="background:${colors[i]}"></span>${n} &nbsp;`).join('');
 function state(id){
  const now=performance.now();
@@ -10,6 +11,7 @@ function state(id){
  if(segments.length)segments.at(-1).end=now;
  current=id;segments.push({id,start:now,wall:new Date(),end:null});
  if(segments.length>200)segments.shift();
+ if(id!==0&&id!==1)$('bpm').textContent='—';
  $('state').textContent=names[id]??id;$('state').style.color=colors[id]??'#b8c9df';
 }
 function alarm(message){
@@ -29,8 +31,14 @@ function packet(value){
  state(id===255?'Warming up / sensor unavailable':id);
  $('details').textContent=`5-second window · update received ${new Date().toLocaleTimeString()} · inference #${counter}`;
 }
+function bpmPacket(value){
+ if(value.byteLength!==2)throw Error('Unsupported BPM packet');
+ const encoded=value.getUint16(0,true);lastBpm=performance.now();
+ $('bpm').textContent=connected&&(current===0||current===1)&&encoded!==65535?(encoded/100).toFixed(2):'—';
+}
+function bpmNotification(event){try{bpmPacket(event.target.value);}catch(e){$('bpm').textContent='—';}}
 function notification(event){try{packet(event.target.value);}catch(e){state('Invalid telemetry');alarm(e.message);}}
-function lost(){connected=false;characteristic?.removeEventListener('characteristicvaluechanged',notification);characteristic=null;state('Disconnected');$('connection').textContent='Connection lost';$('connect').disabled=false;$('disconnect').disabled=true;alarm('Connection lost — reconnect to resume monitoring.');}
+function lost(){connected=false;bpmCharacteristic?.removeEventListener('characteristicvaluechanged',bpmNotification);bpmCharacteristic=null;characteristic?.removeEventListener('characteristicvaluechanged',notification);characteristic=null;state('Disconnected');$('connection').textContent='Connection lost';$('connect').disabled=false;$('disconnect').disabled=true;alarm('Connection lost — reconnect to resume monitoring.');}
 $('connect').onclick=async()=>{
  if(busy)return;busy=true;$('connect').disabled=true;
  try{
@@ -45,6 +53,12 @@ $('connect').onclick=async()=>{
   connected=true;boot=null;lastCounter=null;lastPacket=lastInferenceAt=performance.now();
   state('Waiting for telemetry');alarm('');
   await characteristic.startNotifications();packet(await characteristic.readValue());
+  // Older firmware can continue state monitoring without the optional rate.
+  try{
+   bpmCharacteristic=await service.getCharacteristic(BPM_CHARACTERISTIC);
+   bpmCharacteristic.addEventListener('characteristicvaluechanged',bpmNotification);
+   await bpmCharacteristic.startNotifications();bpmPacket(await bpmCharacteristic.readValue());
+  }catch(e){bpmCharacteristic?.removeEventListener('characteristicvaluechanged',bpmNotification);bpmCharacteristic=null;$('bpm').textContent='—';}
   $('connection').textContent=`Connected to ${device.name||'StisHik'}`;$('disconnect').disabled=false;
  }catch(e){if(device?.gatt.connected)device.gatt.disconnect();connected=false;state('Disconnected');$('connection').textContent=e.message;$('connect').disabled=false;}
  finally{busy=false;}
@@ -54,6 +68,7 @@ $('mute').onclick=()=>{muted=!muted;$('mute').textContent=muted?'Enable sound':'
 function limit(id){const n=Number($(id).value);return Number.isFinite(n)&&n>=1&&n<=3600?n:null;}
 function render(){
  const now=performance.now();
+ if(now-lastBpm>3000)$('bpm').textContent='—';
  if(connected){
   if(now-lastPacket>5000||now-lastInferenceAt>5000){state('Telemetry unavailable');alarm('Telemetry unavailable — updates or inference have stalled.');}
   else{
